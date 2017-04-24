@@ -43,3 +43,13 @@ py_library(
         # tensorflow dep
    ],
 )
+
+py_library(
+    name = "mpb_dset_reader",
+    srcs = ["mpb_dset_reader.py"],
+    deps = [
+        ":utils",
+        # numpy dep
+        # tensorflow dep
+   ],
+)

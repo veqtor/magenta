@@ -622,6 +622,7 @@ def slim_batchnorm_arg_scope(is_training, activation_fn=None):
     return scope
 
 
+
 def conv2d(x,
            kernel_size,
            stride,
@@ -732,3 +733,22 @@ def leaky_relu(leak=0.1):
     A lambda computing the leaky ReLU function with the specified slope.
   """
   return lambda x: tf.maximum(x, leak * x)
+
+def dense_ch(x,
+          in_channels,
+          out_channels,
+          is_training,
+          scope="dense",
+          batch_norm = True,
+          activation_fn=leaky_relu()):
+
+    normalizer_fn = slim.batch_norm if batch_norm else None
+    with tf.variable_scope(scope):
+        with slim.arg_scope(
+                slim_batchnorm_arg_scope(
+                    is_training, activation_fn=None)):
+            x = tf.reshape(x, [-1, in_channels])
+            x = tf.layers.dense(x, out_channels, activation=activation_fn)
+            if batch_norm and is_training:
+                x = tf.layers.batch_normalization(x, axis=1)
+    return x

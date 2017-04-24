@@ -17,6 +17,7 @@
 import tensorflow as tf
 
 from magenta.models.nsynth import reader
+from magenta.models.nsynth import mpb_dset_reader
 from magenta.models.nsynth import utils
 from magenta.models.nsynth.wavenet import masked
 
@@ -36,12 +37,14 @@ class Config(object):
         240000: 2e-6,
     }
     self.ae_hop_length = 512
-    self.ae_bottleneck_width = 16
+    self.gc_input_width = 256
+    self.ae_bottleneck_width = 32
+    self.gc_bottleneck_width = 64
     self.train_path = train_path
 
   def get_batch(self, batch_size):
     assert self.train_path is not None
-    data_train = reader.NSynthDataset(self.train_path, is_training=True)
+    data_train = mpb_dset_reader.MusicPostBotDataset(self.train_path, is_training=True)
     return data_train.get_wavenet_batch(batch_size, length=6144)
 
   @staticmethod
@@ -67,7 +70,7 @@ class Config(object):
     x.set_shape([mb, length, channels])
     return x
 
-  def build(self, inputs, is_training):
+  def build(self, inputs, is_training, is_generation=False):
     """Build the graph for this configuration.
 
     Args:
@@ -78,16 +81,15 @@ class Config(object):
       A dict of outputs that includes the 'predictions', 'loss', the 'encoding',
       the 'quantized_input', and whatever metrics we want to track for eval.
     """
-    del is_training
     num_stages = 10
     num_layers = 30
     filter_length = 3
-    width = 512
-    skip_width = 256
+    width = 256
+    skip_width = 128
     ae_num_stages = 10
     ae_num_layers = 30
     ae_filter_length = 3
-    ae_width = 128
+    ae_width = 64
 
     # Encode the source with 8-bit Mu-Law.
     x = inputs['wav']
@@ -95,40 +97,63 @@ class Config(object):
     x_scaled = tf.cast(x_quantized, tf.float32) / 128.0
     x_scaled = tf.expand_dims(x_scaled, 2)
 
-    ###
-    # The Non-Causal Temporal Encoder.
-    ###
-    en = masked.conv1d(
-        x_scaled,
-        causal=False,
-        num_filters=ae_width,
-        filter_length=ae_filter_length,
-        name='ae_startconv')
+    if is_generation:
+        encoding = inputs['en']
+        gc = inputs['gc']
+        gc = tf.cast(gc, tf.float32)
+        gc = tf.reshape(gc, [-1, 1, self.gc_bottleneck_width])
+    else:
+        ###
+        # The Global Encoder
+        ###
+        gc = inputs['gc_in_vector']
+        gc = tf.cast(gc, tf.float32)
+        gc = tf.reshape(gc, [-1, self.gc_input_width])
+        gc = utils.dense_ch(gc, self.gc_input_width, self.gc_bottleneck_width * 4, scope='gc_ae_d1', is_training=is_training)
+        gc = utils.dense_ch(gc, self.gc_bottleneck_width * 4, self.gc_bottleneck_width * 2, scope='gc_ae_d2', is_training=is_training)
+        gc = utils.dense_ch(gc, self.gc_bottleneck_width * 2, self.gc_bottleneck_width, scope='gc_ae_d3', is_training=is_training, activation_fn=tf.nn.sigmoid)
+        gc = tf.reshape(gc, [-1, 1, self.gc_bottleneck_width])
 
-    for num_layer in xrange(ae_num_layers):
-      dilation = 2**(num_layer % ae_num_stages)
-      d = tf.nn.relu(en)
-      d = masked.conv1d(
-          d,
-          causal=False,
-          num_filters=ae_width,
-          filter_length=ae_filter_length,
-          dilation=dilation,
-          name='ae_dilatedconv_%d' % (num_layer + 1))
-      d = tf.nn.relu(d)
-      en += masked.conv1d(
-          d,
-          num_filters=ae_width,
-          filter_length=1,
-          name='ae_res_%d' % (num_layer + 1))
+        ###
+        # The Non-Causal Temporal Encoder.
+        ###
+        en = masked.conv1d(
+            x_scaled,
+            causal=False,
+            num_filters=ae_width,
+            filter_length=ae_filter_length,
+            name='ae_startconv')
 
-    en = masked.conv1d(
-        en,
-        num_filters=self.ae_bottleneck_width,
-        filter_length=1,
-        name='ae_bottleneck')
-    en = masked.pool1d(en, self.ae_hop_length, name='ae_pool', mode='avg')
-    encoding = en
+        for num_layer in xrange(ae_num_layers):
+          dilation = 2**(num_layer % ae_num_stages)
+          d = tf.nn.relu(en)
+          d = masked.conv1d(
+              d,
+              causal=False,
+              num_filters=ae_width,
+              filter_length=ae_filter_length,
+              dilation=dilation,
+              name='ae_dilatedconv_%d' % (num_layer + 1))
+          d = self._condition(d,
+                              masked.conv1d(
+                                  gc,
+                                  num_filters=ae_width,
+                                  filter_length=1,
+                                  name='ae_gc_cond_map_%d' % (num_layer + 1)))
+          d = tf.nn.relu(d)
+          en += masked.conv1d(
+              d,
+              num_filters=ae_width,
+              filter_length=1,
+              name='ae_res_%d' % (num_layer + 1))
+
+        en = masked.conv1d(
+            en,
+            num_filters=self.ae_bottleneck_width,
+            filter_length=1,
+            name='ae_bottleneck')
+        en = masked.pool1d(en, self.ae_hop_length, name='ae_pool', mode='avg')
+        encoding = en
 
     ###
     # The WaveNet Decoder.
@@ -156,9 +181,16 @@ class Config(object):
                               num_filters=2 * width,
                               filter_length=1,
                               name='cond_map_%d' % (i + 1)))
+      d = self._condition(d,
+                          masked.conv1d(
+                              gc,
+                              num_filters=2 * width,
+                              filter_length=1,
+                              name='gc_cond_map_%d' % (i + 1)))
 
       assert d.get_shape().as_list()[2] % 2 == 0
       m = d.get_shape().as_list()[2] // 2
+
       d_sigmoid = tf.sigmoid(d[:, :, :m])
       d_tanh = tf.tanh(d[:, :, m:])
       d = d_sigmoid * d_tanh
@@ -176,6 +208,12 @@ class Config(object):
                             num_filters=skip_width,
                             filter_length=1,
                             name='cond_map_out1'))
+    s = self._condition(s,
+                        masked.conv1d(
+                            gc,
+                            num_filters=skip_width,
+                            filter_length=1,
+                            name='gc_cond_map_out1'))
     s = tf.nn.relu(s)
 
     ###
@@ -199,4 +237,5 @@ class Config(object):
         },
         'quantized_input': x_quantized,
         'encoding': encoding,
+        'global_condition': gc,
     }

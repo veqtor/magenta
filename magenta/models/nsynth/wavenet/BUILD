@@ -34,6 +34,7 @@ py_library(
     name = "config_library",
     deps = [
         "//magenta/models/nsynth:reader",
+        "//magenta/models/nsynth:mpb_dset_reader",
         ":masked",
         # tensorflow dep
     ],
@@ -70,6 +71,7 @@ py_binary(
     deps = [
         ":configs",
         "//magenta/models/nsynth:reader",
+        "//magenta/models/nsynth:mpb_dset_reader",
         "//magenta/models/nsynth:utils",
         # numpy dep
         # tensorflow dep

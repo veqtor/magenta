@@ -100,12 +100,7 @@ def main(unused_argv=None):
       worker_replicas = FLAGS.worker_replicas
       ema = tf.train.ExponentialMovingAverage(
           decay=0.9999, num_updates=global_step)
-      opt = tf.train.SyncReplicasOptimizer(
-          tf.train.AdamOptimizer(lr, epsilon=1e-8),
-          worker_replicas,
-          total_num_replicas=worker_replicas,
-          variable_averages=ema,
-          variables_to_average=tf.trainable_variables())
+      opt = tf.train.AdamOptimizer(lr, epsilon=1e-8)
 
       train_op = opt.minimize(
           loss,
@@ -116,19 +111,18 @@ def main(unused_argv=None):
       session_config = tf.ConfigProto(allow_soft_placement=True)
 
       is_chief = (FLAGS.task == 0)
-      local_init_op = opt.chief_init_op if is_chief else opt.local_step_init_op
+      #local_init_op = opt.chief_init_op if is_chief else opt.local_step_init_op
 
       slim.learning.train(
           train_op=train_op,
           logdir=logdir,
-          is_chief=is_chief,
+          #is_chief=is_chief,
           master=FLAGS.master,
           number_of_steps=config.num_iters,
           global_step=global_step,
           log_every_n_steps=250,
-          local_init_op=local_init_op,
+          #local_init_op=local_init_op,
           save_interval_secs=300,
-          sync_optimizer=opt,
           session_config=session_config,)
 
 
