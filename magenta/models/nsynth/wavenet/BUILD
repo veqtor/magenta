@@ -64,6 +64,20 @@ py_binary(
 )
 
 py_binary(
+    name = "generate",
+    srcs = [
+        "generate.py",
+    ],
+    deps = [
+        ":configs",
+        "//magenta/models/nsynth:utils",
+        # librosa dep
+        # numpy dep
+        # tensorflow dep
+    ],
+)
+
+py_binary(
     name = "save_embeddings",
     srcs = [
         "save_embeddings.py",

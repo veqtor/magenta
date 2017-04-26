@@ -88,10 +88,13 @@ def main(unused_argv=None):
   with tf.Graph().as_default(), tf.device("/gpu:0"):
     sample_length = FLAGS.sample_length
     batch_size = FLAGS.batch_size
+    gc_in_vector_placeholder = tf.placeholder(
+        tf.float32, shape=[batch_size, 1, ])
     wav_placeholder = tf.placeholder(
         tf.float32, shape=[batch_size, sample_length])
-    graph = config.build({"wav": wav_placeholder}, is_training=False)
+    graph = config.build({"wav": wav_placeholder, "gc_in_vector": gc_in_vector_placeholder}, is_training=False)
     graph_encoding = graph["encoding"]
+    gc_graph_encoding = graph["global_condition"]
 
     ema = tf.train.ExponentialMovingAverage(decay=0.9999)
     variables_to_restore = ema.variables_to_restore()
@@ -128,6 +131,13 @@ def main(unused_argv=None):
             tf.logging.info("On file %s of %d (batch %d).", start_file, len(wavfiles), batch_number)
             encoding = []
             wavdata = utils.load_wav(f, sample_rate)
+            gc_in_vector = np.random.randn(config.gc_input_width)
+            gc = sess.run(
+                gc_graph_encoding,
+                feed_dict={wav_placeholder: wavdata[:sample_length], gc_in_vector_placeholder: gc_in_vector})
+            filename = "%s_gc_embeddings.npy" % f.split("/")[-1].strip(".wav")
+            with tf.gfile.Open(os.path.join(savedir, filename), "w") as outfile:
+                np.save(outfile, np.asarray(gc).reshape(-1, config.gc_bottleneck_width))
             if normalize_audio:
                 wavdata = utils.normalize(wavdata)
             total_length = len(wavdata)
@@ -148,7 +158,7 @@ def main(unused_argv=None):
                 try:
                     piece = np.reshape(piece, (-1, sample_length))
                     pred = sess.run(
-                            graph_encoding, feed_dict={wav_placeholder: piece})
+                            graph_encoding, feed_dict={wav_placeholder: piece, gc_in_vector_placeholder: gc_in_vector})
                     if piece_factor is None:
                         encoding.append(pred.reshape(-1, config.ae_bottleneck_width))
                     else:

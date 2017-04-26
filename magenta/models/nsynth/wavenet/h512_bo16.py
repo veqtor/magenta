@@ -84,21 +84,23 @@ class Config(object):
     num_stages = 10
     num_layers = 30
     filter_length = 3
-    width = 256
-    skip_width = 128
+    res_width = 256
+    skip_width = 256
     ae_num_stages = 10
     ae_num_layers = 30
     ae_filter_length = 3
     ae_width = 64
 
     # Encode the source with 8-bit Mu-Law.
+
     x = inputs['wav']
     x_quantized = utils.mu_law(x)
     x_scaled = tf.cast(x_quantized, tf.float32) / 128.0
     x_scaled = tf.expand_dims(x_scaled, 2)
+    x_mb, x_length, x_channels = x_scaled.get_shape().as_list()
 
     if is_generation:
-        encoding = inputs['en']
+        local_condition = inputs['en']
         gc = inputs['gc']
         gc = tf.cast(gc, tf.float32)
         gc = tf.reshape(gc, [-1, 1, self.gc_bottleneck_width])
@@ -117,7 +119,7 @@ class Config(object):
         ###
         # The Non-Causal Temporal Encoder.
         ###
-        en = masked.conv1d(
+        lc = masked.conv1d(
             x_scaled,
             causal=False,
             num_filters=ae_width,
@@ -126,7 +128,7 @@ class Config(object):
 
         for num_layer in xrange(ae_num_layers):
           dilation = 2**(num_layer % ae_num_stages)
-          d = tf.nn.relu(en)
+          d = tf.nn.relu(lc)
           d = masked.conv1d(
               d,
               causal=False,
@@ -141,26 +143,61 @@ class Config(object):
                                   filter_length=1,
                                   name='ae_gc_cond_map_%d' % (num_layer + 1)))
           d = tf.nn.relu(d)
-          en += masked.conv1d(
+          lc += masked.conv1d(
               d,
               num_filters=ae_width,
               filter_length=1,
               name='ae_res_%d' % (num_layer + 1))
 
-        en = masked.conv1d(
-            en,
+        lc = masked.conv1d(
+            lc,
             num_filters=self.ae_bottleneck_width,
             filter_length=1,
             name='ae_bottleneck')
-        en = masked.pool1d(en, self.ae_hop_length, name='ae_pool', mode='avg')
-        encoding = en
+        lc = masked.pool1d(lc, self.ae_hop_length, name='ae_pool', mode='avg')
+        local_condition = lc
+
+    ###
+    # Local conditioning upsampler
+    ###
+
+    lc_mb, lc_length, lc_channels = local_condition.get_shape().as_list()
+
+    assert self.ae_bottleneck_width == lc_channels
+    assert x_mb == lc_mb
+    assert lc_length * self.ae_hop_length == x_length
+
+    local_condition = tf.reshape(local_condition, [-1, 1, lc_length, lc_channels])
+
+    local_condition = utils.conv2d(
+        local_condition, [1, self.ae_hop_length / 4], [1, self.ae_hop_length / 4],
+        self.ae_bottleneck_width,
+        is_training,
+        activation_fn=utils.leaky_relu(),
+        transpose=True,
+        batch_norm=True,
+        scope="upsampler_1")
+    local_condition = utils.conv2d(
+        local_condition, [1, 4], [1, 4],
+        self.ae_bottleneck_width,
+        is_training,
+        activation_fn=utils.leaky_relu(),
+        transpose=True,
+        batch_norm=True,
+        scope="upsampler_2")
+
+    local_condition = tf.reshape(local_condition, [-1, x_length, self.ae_bottleneck_width])
+
+    uplc_mb, uplc_length, uplc_channels = local_condition.get_shape().as_list()
+
+    assert uplc_mb == x_mb
 
     ###
     # The WaveNet Decoder.
     ###
     l = masked.shift_right(x_scaled)
     l = masked.conv1d(
-        l, num_filters=width, filter_length=filter_length, name='startconv')
+        l, num_filters=res_width, filter_length=filter_length, name='startconv')
 
     # Set up skip connections.
     s = masked.conv1d(
@@ -171,20 +208,20 @@ class Config(object):
       dilation = 2**(i % num_stages)
       d = masked.conv1d(
           l,
-          num_filters=2 * width,
+          num_filters=2 * res_width,
           filter_length=filter_length,
           dilation=dilation,
           name='dilatedconv_%d' % (i + 1))
       d = self._condition(d,
                           masked.conv1d(
-                              en,
-                              num_filters=2 * width,
+                              local_condition,
+                              num_filters=2 * res_width,
                               filter_length=1,
                               name='cond_map_%d' % (i + 1)))
       d = self._condition(d,
                           masked.conv1d(
                               gc,
-                              num_filters=2 * width,
+                              num_filters=2 * res_width,
                               filter_length=1,
                               name='gc_cond_map_%d' % (i + 1)))
 
@@ -196,7 +233,7 @@ class Config(object):
       d = d_sigmoid * d_tanh
 
       l += masked.conv1d(
-          d, num_filters=width, filter_length=1, name='res_%d' % (i + 1))
+          d, num_filters=res_width, filter_length=1, name='res_%d' % (i + 1))
       s += masked.conv1d(
           d, num_filters=skip_width, filter_length=1, name='skip_%d' % (i + 1))
 
@@ -204,7 +241,7 @@ class Config(object):
     s = masked.conv1d(s, num_filters=skip_width, filter_length=1, name='out1')
     s = self._condition(s,
                         masked.conv1d(
-                            en,
+                            local_condition,
                             num_filters=skip_width,
                             filter_length=1,
                             name='cond_map_out1'))
@@ -236,6 +273,6 @@ class Config(object):
             'nll': loss
         },
         'quantized_input': x_quantized,
-        'encoding': encoding,
+        'encoding': lc,
         'global_condition': gc,
     }
