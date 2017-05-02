@@ -89,18 +89,15 @@ def main(unused_argv=None):
     sample_length = FLAGS.sample_length
     batch_size = FLAGS.batch_size
     gc_in_vector_placeholder = tf.placeholder(
-        tf.float32, shape=[batch_size, 1, ])
+        tf.float32, shape=[batch_size, config.gc_input_width])
     wav_placeholder = tf.placeholder(
         tf.float32, shape=[batch_size, sample_length])
     graph = config.build({"wav": wav_placeholder, "gc_in_vector": gc_in_vector_placeholder}, is_training=False)
     graph_encoding = graph["encoding"]
     gc_graph_encoding = graph["global_condition"]
 
-    ema = tf.train.ExponentialMovingAverage(decay=0.9999)
-    variables_to_restore = ema.variables_to_restore()
-
     # Create a saver, which is used to restore the parameters from checkpoints
-    saver = tf.train.Saver(variables_to_restore)
+    saver = tf.train.Saver(tf.all_variables())
 
     session_config = tf.ConfigProto(allow_soft_placement=True)
     # Set the opt_level to prevent py_funcs from being executed multiple times.
@@ -132,9 +129,11 @@ def main(unused_argv=None):
             encoding = []
             wavdata = utils.load_wav(f, sample_rate)
             gc_in_vector = np.random.randn(config.gc_input_width)
+            gc_in_vector = np.reshape(gc_in_vector, (-1,config.gc_input_width))
             gc = sess.run(
                 gc_graph_encoding,
-                feed_dict={wav_placeholder: wavdata[:sample_length], gc_in_vector_placeholder: gc_in_vector})
+                feed_dict={wav_placeholder: np.reshape(wavdata[:sample_length], (-1, sample_length)),
+                           gc_in_vector_placeholder: gc_in_vector})
             filename = "%s_gc_embeddings.npy" % f.split("/")[-1].strip(".wav")
             with tf.gfile.Open(os.path.join(savedir, filename), "w") as outfile:
                 np.save(outfile, np.asarray(gc).reshape(-1, config.gc_bottleneck_width))

@@ -40,6 +40,7 @@ class Config(object):
     self.gc_input_width = 256
     self.ae_bottleneck_width = 32
     self.gc_bottleneck_width = 64
+    self.receptive_field_size = 1536
     self.train_path = train_path
 
   def get_batch(self, batch_size):
@@ -101,9 +102,15 @@ class Config(object):
 
     if is_generation:
         local_condition = inputs['en']
+        x_scaled = tf.reshape(x_scaled,[1, -1, x_channels])
+        x_mb, x_length, x_channels = x_scaled.get_shape().as_list()
+
         gc = inputs['gc']
         gc = tf.cast(gc, tf.float32)
-        gc = tf.reshape(gc, [-1, 1, self.gc_bottleneck_width])
+
+        gc = tf.reshape(gc, [self.gc_bottleneck_width])
+        gc = tf.tile(gc, [x_length])
+        gc = tf.reshape(gc, [x_mb, x_length, self.gc_bottleneck_width])
     else:
         ###
         # The Global Encoder
@@ -160,14 +167,16 @@ class Config(object):
     ###
     # Local conditioning upsampler
     ###
+    if is_generation:
+        local_condition = tf.reshape(local_condition, [-1, x_length/self.ae_hop_length, self.ae_bottleneck_width])
 
     lc_mb, lc_length, lc_channels = local_condition.get_shape().as_list()
 
     assert self.ae_bottleneck_width == lc_channels
     assert x_mb == lc_mb
-    assert lc_length * self.ae_hop_length == x_length
+    print('lc_len: ' + str(int(lc_mb * self.ae_hop_length)) + ' xlen: ' + str(x_length) + ' x_mb: ' + str(x_mb) + ' xchans' + str(x_channels))
 
-    local_condition = tf.reshape(local_condition, [-1, 1, lc_length, lc_channels])
+    local_condition = tf.reshape(local_condition, [-1, lc_mb, lc_length, lc_channels])
 
     local_condition = utils.conv2d(
         local_condition, [1, self.ae_hop_length / 4], [1, self.ae_hop_length / 4],
@@ -186,7 +195,7 @@ class Config(object):
         batch_norm=True,
         scope="upsampler_2")
 
-    local_condition = tf.reshape(local_condition, [-1, x_length, self.ae_bottleneck_width])
+    local_condition = tf.reshape(local_condition, [x_mb, x_length, self.ae_bottleneck_width])
 
     uplc_mb, uplc_length, uplc_channels = local_condition.get_shape().as_list()
 
@@ -259,20 +268,25 @@ class Config(object):
     logits = masked.conv1d(s, num_filters=256, filter_length=1, name='logits')
     logits = tf.reshape(logits, [-1, 256])
     probs = tf.nn.softmax(logits, name='softmax')
-    x_indices = tf.cast(tf.reshape(x_quantized, [-1]), tf.int32) + 128
-    loss = tf.reduce_mean(
-        tf.nn.sparse_softmax_cross_entropy_with_logits(
-            logits=logits, labels=x_indices, name='nll'),
-        0,
-        name='loss')
 
-    return {
-        'predictions': probs,
-        'loss': loss,
-        'eval': {
-            'nll': loss
-        },
-        'quantized_input': x_quantized,
-        'encoding': lc,
-        'global_condition': gc,
-    }
+    if is_generation:
+        return {
+            'predictions': probs,
+        }
+    else:
+        x_indices = tf.cast(tf.reshape(x_quantized, [-1]), tf.int32) + 128
+        loss = tf.reduce_mean(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(
+                logits=logits, labels=x_indices, name='nll'),
+            0,
+            name='loss')
+        return {
+            'predictions': probs,
+            'loss': loss,
+            'eval': {
+                'nll': loss
+            },
+            'quantized_input': x_quantized,
+            'encoding': lc,
+            'global_condition': gc,
+        }
